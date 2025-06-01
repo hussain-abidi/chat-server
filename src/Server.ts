@@ -4,7 +4,8 @@ import { Database } from "bun:sqlite";
 
 interface WsData {
   id: number,
-  username?: string;
+  username: string;
+  token: string;
 };
 
 type SocketType = ServerWebSocket<WsData>;
@@ -69,6 +70,13 @@ export class Server {
             const username = reqJson.username;
             const password = reqJson.password;
 
+            // unnecessary looping?
+            for (const session of this.sessions.values()) {
+              if (session.username === username && session.valid) {
+                return new Response("Already logged in", { status: 409 });
+              }
+            }
+
             const query = this.db.prepare("SELECT password_hash FROM user_hashes WHERE username = ? LIMIT 1") as {
               get: (params: any) => { password_hash: string } | undefined;
             };
@@ -99,11 +107,11 @@ export class Server {
             const token = url.searchParams.get("token");
             const username = token ? this.sessions.get(token)?.username : null;
 
-            if (!username) {
+            if (!token || !username) {
               return new Response("Unauthorized", { status: 401 });
             }
 
-            const data: WsData = { id: this.counter++, username };
+            const data: WsData = { id: this.counter++, username, token };
 
             if (server.upgrade(req, { data })) {
               return;
@@ -124,7 +132,7 @@ export class Server {
       },
     });
 
-    console.log(`Server listening on port ${this.port}`);
+    console.log(`Server listening on port ${this.port}.`);
   }
 
   socketOpen(ws: SocketType) {
@@ -136,25 +144,30 @@ export class Server {
 
   socketMessage(ws: SocketType, message: string) {
     const id = ws.data.id;
+    const token = ws.data.token;
 
-    console.log(`Message received from client ${id}: ${message}`);
+    const session = this.sessions.get(token)!;
+    if (!session.valid) {
+      console.log(`Client ${id} timeout.`);
+      ws.close(3008);
+
+      return;
+    }
+
+    console.log(`Message received from client ${id}: ${message.trim()}`);
   }
 
   socketClose(ws: SocketType) {
     const id = ws.data.id;
-    const username = ws.data.username;
+    const token = ws.data.token;
 
-    if (username) {
-      for (const [token, session] of this.sessions) {
-        if (session.username === username) {
-          this.sessions.delete(token);
-          console.log(`User ${username} logged out.`);
-          break;
-        }
-      }
-    }
     this.sockets.delete(id);
 
-    console.log(`Client ${id} disconnected`);
+    const session = this.sessions.get(token)!;
+    this.sessions.delete(token);
+
+    console.log(`User ${session.username} logged out.`);
+
+    console.log(`Client ${id} disconnected.`);
   }
 };

@@ -12,6 +12,6 @@ export class UserSession {
     this.token = randomUUID();
     this.valid = true;
 
-    setTimeout(() => { this.valid = false }, 60 * 60 * 1000); // 1 hour
+    setTimeout(() => { this.valid = false }, 60 * 60 * 10); // 1 hour
   }
 }
