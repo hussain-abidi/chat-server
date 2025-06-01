@@ -2,6 +2,14 @@ import { type ServerWebSocket } from "bun";
 import { UserSession } from "./User";
 import { Database } from "bun:sqlite";
 
+const CORS_HEADERS = {
+  headers: {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'OPTIONS, POST',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  },
+};
+
 interface WsData {
   id: number,
   username: string;
@@ -37,6 +45,9 @@ export class Server {
     Bun.serve({
       port: this.port,
       fetch: async (req, server) => {
+        if (req.method === "OPTIONS") {
+          return new Response(null, CORS_HEADERS);
+        }
         const url = new URL(req.url);
 
         switch (url.pathname) {
@@ -47,11 +58,15 @@ export class Server {
             const username = reqJson.username;
             const password = reqJson.password;
 
+            if (!username || !password) {
+              return new Response("Empty credentials are not allowed", { status: 400, ...CORS_HEADERS });
+            }
+
             const query = this.db.prepare("SELECT 1 FROM user_hashes WHERE username = ? LIMIT 1");
             const row = query.get(username);
 
             if (row) {
-              return new Response("Username already exists", { status: 400 });
+              return new Response("Username already exists", { status: 400, ...CORS_HEADERS });
             }
 
             const hashedPassword = await Bun.password.hash(password);
@@ -60,7 +75,7 @@ export class Server {
 
             insertQuery.run(username, hashedPassword);
 
-            return new Response("Registered successfully");
+            return new Response("Registered successfully", CORS_HEADERS);
           }
 
           case "/login": {
@@ -73,7 +88,7 @@ export class Server {
             // unnecessary looping?
             for (const session of this.sessions.values()) {
               if (session.username === username && session.valid) {
-                return new Response("Already logged in", { status: 409 });
+                return new Response("Already logged in", { status: 409, ...CORS_HEADERS });
               }
             }
 
@@ -97,10 +112,11 @@ export class Server {
               this.sessions.set(token, session);
 
               console.log(`User ${username} logged in.`);
-              return Response.json({ token });
+
+              return Response.json({ token }, CORS_HEADERS);
             }
 
-            return new Response("Invalid credentials", { status: 401 });
+            return new Response("Invalid credentials", { status: 401, ...CORS_HEADERS });
           }
 
           case "/ws": {
@@ -108,7 +124,7 @@ export class Server {
             const username = token ? this.sessions.get(token)?.username : null;
 
             if (!token || !username) {
-              return new Response("Unauthorized", { status: 401 });
+              return new Response("Unauthorized", { status: 401, ...CORS_HEADERS });
             }
 
             const data: WsData = { id: this.counter++, username, token };
@@ -117,11 +133,11 @@ export class Server {
               return;
             }
 
-            return new Response("Upgrade failed", { status: 500 });
+            return new Response("Upgrade failed", { status: 500, ...CORS_HEADERS });
           }
 
           default: {
-            return new Response("Not found", { status: 404 });
+            return new Response("Not found", { status: 404, ...CORS_HEADERS });
           }
         }
       },
