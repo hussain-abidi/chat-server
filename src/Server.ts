@@ -1,6 +1,6 @@
 import { type ServerWebSocket } from "bun";
-import { UserSession } from "./User";
 import { Database } from "bun:sqlite";
+import { randomUUID } from "crypto";
 
 const CORS_HEADERS = {
   headers: {
@@ -12,7 +12,6 @@ const CORS_HEADERS = {
 
 interface WsData {
   id: number,
-  username: string;
   token: string;
 };
 
@@ -25,7 +24,7 @@ export class Server {
 
   sockets = new Map<number, SocketType>();
 
-  sessions = new Map<string, UserSession>();
+  tokens = new Map<string, string>();
 
   db: Database;
 
@@ -85,11 +84,8 @@ export class Server {
             const username = reqJson.username;
             const password = reqJson.password;
 
-            // unnecessary looping?
-            for (const session of this.sessions.values()) {
-              if (session.username === username && session.valid) {
-                return new Response("Already logged in", { status: 409, ...CORS_HEADERS });
-              }
+            if (this.tokens.has(username)) {
+              return new Response("Already logged in", { status: 409, ...CORS_HEADERS });
             }
 
             const query = this.db.prepare("SELECT password_hash FROM user_hashes WHERE username = ? LIMIT 1") as {
@@ -106,12 +102,8 @@ export class Server {
                 break login;
               }
 
-              const session = new UserSession(username);
-              const token = session.token;
-
-              this.sessions.set(token, session);
-
-              console.log(`User ${username} logged in.`);
+              const token = randomUUID();
+              this.tokens.set(username, token);
 
               return Response.json({ token }, CORS_HEADERS);
             }
@@ -121,13 +113,11 @@ export class Server {
 
           case "/ws": {
             const token = url.searchParams.get("token");
-            const username = token ? this.sessions.get(token)?.username : null;
-
-            if (!token || !username) {
+            if (!token || !Array.from(this.tokens.values()).includes(token)) {
               return new Response("Unauthorized", { status: 401, ...CORS_HEADERS });
             }
 
-            const data: WsData = { id: this.counter++, username, token };
+            const data: WsData = { id: this.counter++, token };
 
             if (server.upgrade(req, { data })) {
               return;
@@ -160,15 +150,6 @@ export class Server {
 
   socketMessage(ws: SocketType, message: string) {
     const id = ws.data.id;
-    const token = ws.data.token;
-
-    const session = this.sessions.get(token)!;
-    if (!session.valid) {
-      console.log(`Client ${id} timeout.`);
-      ws.close(3008);
-
-      return;
-    }
 
     console.log(`Message received from client ${id}: ${message.trim()}`);
   }
@@ -178,11 +159,6 @@ export class Server {
     const token = ws.data.token;
 
     this.sockets.delete(id);
-
-    const session = this.sessions.get(token)!;
-    this.sessions.delete(token);
-
-    console.log(`User ${session.username} logged out.`);
 
     console.log(`Client ${id} disconnected.`);
   }
