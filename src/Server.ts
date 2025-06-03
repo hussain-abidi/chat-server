@@ -11,7 +11,6 @@ const CORS_HEADERS = {
 };
 
 interface WsData {
-  id: number,
   username: string,
   token: string
 };
@@ -19,11 +18,9 @@ interface WsData {
 type SocketType = ServerWebSocket<WsData>;
 
 export class Server {
-  counter = 0;
-
   port: number;
 
-  sockets = new Map<number, SocketType>()
+  sockets = new Map<string, SocketType>()
 
   tokens = new Map<string, string>();
 
@@ -123,7 +120,7 @@ export class Server {
               return Response.json({ message: "Unauthorized" }, { status: 401, ...CORS_HEADERS });
             }
 
-            const data: WsData = { id: this.counter++, username, token };
+            const data: WsData = { username, token };
 
             if (server.upgrade(req, { data })) {
               return;
@@ -148,31 +145,31 @@ export class Server {
   }
 
   socketOpen(ws: SocketType) {
-    const id = ws.data.id;
     const username = ws.data.username;
 
-    this.sockets.set(id, ws);
+    this.sockets.set(username, ws);
 
-    console.log(`Client ${id} (${username}) connected from ${ws.remoteAddress}.`);
+    console.log(`${username} connected from ${ws.remoteAddress}.`);
   }
 
   socketMessage(ws: SocketType, message: string) {
-    const id = ws.data.id;
     const username = ws.data.username;
 
-    console.log(`Message received from client ${id} (${username}): ${message.trim()}`);
+    const data = JSON.parse(message);
+    const target = this.sockets.get(data.to);
 
-    for (const [_, socket] of this.sockets) {
-      socket.send(JSON.stringify({username: username, message: message}));
+    if (target) {
+      target.send(JSON.stringify({ from: username, message: data.message }));
+
+    console.log(`Message from ${username} to ${data.to}: ${data.message}`);
     }
   }
 
   socketClose(ws: SocketType) {
-    const id = ws.data.id;
     const username = ws.data.username;
 
-    this.sockets.delete(id);
+    this.sockets.delete(username);
 
-    console.log(`Client ${id} (${username}) disconnected.`);
+    console.log(`${username} disconnected.`);
   }
 };
