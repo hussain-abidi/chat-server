@@ -161,6 +161,10 @@ export class Server {
     const username = ws.data.username;
 
     console.log(`Message received from client ${id} (${username}): ${message.trim()}`);
+
+    for (const [_, socket] of this.sockets) {
+      socket.send(JSON.stringify({username: username, message: message}));
+    }
   }
 
   socketClose(ws: SocketType) {
