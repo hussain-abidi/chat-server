@@ -12,7 +12,8 @@ const CORS_HEADERS = {
 
 interface WsData {
   id: number,
-  token: string;
+  username: string,
+  token: string
 };
 
 type SocketType = ServerWebSocket<WsData>;
@@ -22,7 +23,7 @@ export class Server {
 
   port: number;
 
-  sockets = new Map<number, SocketType>();
+  sockets = new Map<number, SocketType>()
 
   tokens = new Map<string, string>();
 
@@ -58,14 +59,15 @@ export class Server {
             const password = reqJson.password;
 
             if (!username || !password) {
-              return new Response("Empty credentials are not allowed", { status: 400, ...CORS_HEADERS });
+              return Response.json({ message: "Empty credentials are not allowed" }, { status: 400, ...CORS_HEADERS });
             }
+
 
             const query = this.db.prepare("SELECT 1 FROM user_hashes WHERE username = ? LIMIT 1");
             const row = query.get(username);
 
             if (row) {
-              return new Response("Username already exists", { status: 400, ...CORS_HEADERS });
+              return Response.json({ message: "Username already exists" }, { status: 400, ...CORS_HEADERS });
             }
 
             const hashedPassword = await Bun.password.hash(password);
@@ -74,7 +76,7 @@ export class Server {
 
             insertQuery.run(username, hashedPassword);
 
-            return new Response("Registered successfully", CORS_HEADERS);
+            return Response.json({ message: "Registered successfully" }, CORS_HEADERS);
           }
 
           case "/login": {
@@ -84,8 +86,10 @@ export class Server {
             const username = reqJson.username;
             const password = reqJson.password;
 
-            if (this.tokens.has(username)) {
-              return new Response("Already logged in", { status: 409, ...CORS_HEADERS });
+            for (const [token, user] of this.tokens) {
+              if (user === username) {
+                return Response.json({ token }, CORS_HEADERS);
+              }
             }
 
             const query = this.db.prepare("SELECT password_hash FROM user_hashes WHERE username = ? LIMIT 1") as {
@@ -103,31 +107,33 @@ export class Server {
               }
 
               const token = randomUUID();
-              this.tokens.set(username, token);
+              this.tokens.set(token, username);
 
               return Response.json({ token }, CORS_HEADERS);
             }
 
-            return new Response("Invalid credentials", { status: 401, ...CORS_HEADERS });
+            return Response.json({ message: "Invalid credentials" }, { status: 401, ...CORS_HEADERS });
           }
 
           case "/ws": {
             const token = url.searchParams.get("token");
-            if (!token || !Array.from(this.tokens.values()).includes(token)) {
-              return new Response("Unauthorized", { status: 401, ...CORS_HEADERS });
+            const username = token ? this.tokens.get(token) : undefined;
+
+            if (!token || !username) {
+              return Response.json({ message: "Unauthorized" }, { status: 401, ...CORS_HEADERS });
             }
 
-            const data: WsData = { id: this.counter++, token };
+            const data: WsData = { id: this.counter++, username, token };
 
             if (server.upgrade(req, { data })) {
               return;
             }
 
-            return new Response("Upgrade failed", { status: 500, ...CORS_HEADERS });
+            return Response.json({ message: "Upgrade failed" }, { status: 500, ...CORS_HEADERS });
           }
 
           default: {
-            return new Response("Not found", { status: 404, ...CORS_HEADERS });
+            return Response.json({ message: "Not found" }, { status: 404, ...CORS_HEADERS });
           }
         }
       },
@@ -143,23 +149,26 @@ export class Server {
 
   socketOpen(ws: SocketType) {
     const id = ws.data.id;
+    const username = ws.data.username;
+
     this.sockets.set(id, ws);
 
-    console.log(`Client ${id} connected from ${ws.remoteAddress}.`);
+    console.log(`Client ${id} (${username}) connected from ${ws.remoteAddress}.`);
   }
 
   socketMessage(ws: SocketType, message: string) {
     const id = ws.data.id;
+    const username = ws.data.username;
 
-    console.log(`Message received from client ${id}: ${message.trim()}`);
+    console.log(`Message received from client ${id} (${username}): ${message.trim()}`);
   }
 
   socketClose(ws: SocketType) {
     const id = ws.data.id;
-    const token = ws.data.token;
+    const username = ws.data.username;
 
     this.sockets.delete(id);
 
-    console.log(`Client ${id} disconnected.`);
+    console.log(`Client ${id} (${username}) disconnected.`);
   }
 };
