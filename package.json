@@ -1,5 +1,5 @@
 {
-  "name": "server",
+  "name": "chat-server",
   "module": "src/index.ts",
   "type": "module",
   "scripts": {

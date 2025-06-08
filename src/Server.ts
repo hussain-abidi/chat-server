@@ -1,14 +1,6 @@
 import { type ServerWebSocket } from "bun";
-import { Database } from "bun:sqlite";
+import { DB } from "./Database"
 import { randomUUID } from "crypto";
-
-const CORS_HEADERS = {
-  headers: {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'OPTIONS, POST',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  },
-};
 
 interface WsData {
   username: string,
@@ -17,6 +9,11 @@ interface WsData {
 
 type SocketType = ServerWebSocket<WsData>;
 
+interface MessageType {
+  to: string,
+  message: string
+}
+
 export class Server {
   port: number;
 
@@ -24,116 +21,18 @@ export class Server {
 
   tokens = new Map<string, string>();
 
-  db: Database;
+  db: DB;
 
   constructor(port: number) {
     this.port = port;
 
-    this.db = new Database("users.sqlite");
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS user_hashes (
-        username VARCHAR(255) PRIMARY KEY,
-        password_hash TEXT NOT NULL
-      );
-    `);
+    this.db = new DB();
   }
 
   run() {
     Bun.serve({
       port: this.port,
-      fetch: async (req, server) => {
-        if (req.method === "OPTIONS") {
-          return new Response(null, CORS_HEADERS);
-        }
-        const url = new URL(req.url);
-
-        switch (url.pathname) {
-          case "/register": {
-            if (req.method !== "POST") { break; }
-            const reqJson = await req.json();
-
-            const username = reqJson.username;
-            const password = reqJson.password;
-
-            if (!username || !password) {
-              return Response.json({ message: "Empty credentials are not allowed" }, { status: 400, ...CORS_HEADERS });
-            }
-
-
-            const query = this.db.prepare("SELECT 1 FROM user_hashes WHERE username = ? LIMIT 1");
-            const row = query.get(username);
-
-            if (row) {
-              return Response.json({ message: "Username already exists" }, { status: 400, ...CORS_HEADERS });
-            }
-
-            const hashedPassword = await Bun.password.hash(password);
-
-            const insertQuery = this.db.prepare("INSERT INTO user_hashes(username, password_hash) VALUES(?, ?)");
-
-            insertQuery.run(username, hashedPassword);
-
-            return Response.json({ message: "Registered successfully" }, CORS_HEADERS);
-          }
-
-          case "/login": {
-            if (req.method !== "POST") { break; }
-            const reqJson = await req.json();
-
-            const username = reqJson.username;
-            const password = reqJson.password;
-
-            for (const [token, user] of this.tokens) {
-              if (user === username) {
-                return Response.json({ token }, CORS_HEADERS);
-              }
-            }
-
-            const query = this.db.prepare("SELECT password_hash FROM user_hashes WHERE username = ? LIMIT 1") as {
-              get: (params: any) => { password_hash: string } | undefined;
-            };
-
-            const row = query.get(username);
-
-            // labeled if statement
-            login: if (row) {
-              const hashedPassword = row.password_hash;
-
-              if (!hashedPassword || !await Bun.password.verify(password, hashedPassword)) {
-                break login;
-              }
-
-              const token = randomUUID();
-              this.tokens.set(token, username);
-
-              return Response.json({ token }, CORS_HEADERS);
-            }
-
-            return Response.json({ message: "Invalid credentials" }, { status: 401, ...CORS_HEADERS });
-          }
-
-          case "/ws": {
-            const token = url.searchParams.get("token");
-            const username = token ? this.tokens.get(token) : undefined;
-
-            if (!token || !username) {
-              return Response.json({ message: "Unauthorized" }, { status: 401, ...CORS_HEADERS });
-            }
-
-            const data: WsData = { username, token };
-
-            if (server.upgrade(req, { data })) {
-              return;
-            }
-
-            return Response.json({ message: "Upgrade failed" }, { status: 500, ...CORS_HEADERS });
-          }
-
-          default: {
-            return Response.json({ message: "Not found" }, { status: 404, ...CORS_HEADERS });
-          }
-        }
-      },
+      fetch: this.serverFetch,
       websocket: {
         open: (ws: SocketType) => this.socketOpen(ws),
         message: (ws: SocketType, message: string) => this.socketMessage(ws, message),
@@ -142,6 +41,111 @@ export class Server {
     });
 
     console.log(`Server listening on port ${this.port}.`);
+  }
+
+  serverFetch = async (req: Request, server: any) => {
+    const url = new URL(req.url);
+
+    switch (url.pathname) {
+      case "/register": return this.handleRegister(req);
+      case "/login": return this.handleLogin(req);
+      case "/ws": return this.handleWS(req, server);
+      case "/logout": return this.handleLogout(req);
+
+      default: return this.handleStatic(req);
+    }
+  }
+
+  async handleRegister(req: Request) {
+    if (req.method !== "POST") { return; }
+
+    const reqJson = await req.json();
+
+    const username = reqJson.username;
+    const password = reqJson.password;
+
+    if (!username || !password) {
+      return Response.json({ message: "Empty credentials are not allowed" }, { status: 400 });
+    }
+
+    if (this.db.getHashedPassword(username)) {
+      return Response.json({ message: "Username already exists" }, { status: 400 });
+    }
+
+    const hashedPassword = await Bun.password.hash(password);
+
+    this.db.insertUser(username, hashedPassword);
+
+    return Response.json({ message: "Registered successfully" });
+  }
+
+  async handleLogin(req: Request) {
+    if (req.method !== "POST") { return; }
+
+    const reqJson = await req.json();
+
+    const username = reqJson.username;
+    const password = reqJson.password;
+
+    for (const [token, user] of this.tokens) {
+      if (user === username) {
+        return Response.json({ token });
+      }
+    }
+
+    const hashedPassword = this.db.getHashedPassword(username);
+
+    if (!hashedPassword || !await Bun.password.verify(password, hashedPassword)) {
+      return Response.json({ message: "Invalid credentials" }, { status: 401 });
+    }
+
+    const token = randomUUID();
+    this.tokens.set(token, username);
+
+    return Response.json({ token });
+  }
+
+  async handleWS(req: Request, server: any) {
+    const token = new URL(req.url).searchParams.get("token");
+    const username = token ? this.tokens.get(token) : undefined;
+
+    if (!token || !username) {
+      return Response.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const data: WsData = { username, token };
+
+    if (server.upgrade(req, { data })) {
+      return;
+    }
+
+    return Response.json({ message: "Upgrade failed" }, { status: 500 });
+  }
+
+  async handleLogout(req: Request) {
+    if (req.method !== "POST") { return; }
+
+    const reqJson = await req.json();
+    const username = reqJson.username;
+
+    for (const [token, user] of this.tokens) {
+      if (user === username) {
+        this.tokens.delete(token);
+      }
+    }
+  }
+
+  async handleStatic(req: Request) {
+    const url = new URL(req.url);
+    const path = url.pathname === "/" ? "/public/index.html" : url.pathname;
+
+    const file = Bun.file(`../client${path}`);
+
+    if (!(await file.exists())) {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    return new Response(file);
   }
 
   socketOpen(ws: SocketType) {
@@ -155,13 +159,21 @@ export class Server {
   socketMessage(ws: SocketType, message: string) {
     const username = ws.data.username;
 
-    const data = JSON.parse(message);
+    const data: MessageType = JSON.parse(message);
     const target = this.sockets.get(data.to);
 
-    if (target) {
-      target.send(JSON.stringify({ from: username, message: data.message }));
+    const trimmedMessage = data.message.trim();
 
-    console.log(`Message from ${username} to ${data.to}: ${data.message}`);
+    if (!trimmedMessage) {
+      return;
+    }
+
+    if (target) {
+      target.send(JSON.stringify({ from: username, message: trimmedMessage }));
+
+      this.db.insertMessage(username, data.to, trimmedMessage);
+
+      console.log(`Message from ${username} to ${data.to}: ${data.message} `);
     }
   }
 
